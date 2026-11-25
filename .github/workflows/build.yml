@@ -1,0 +1,55 @@
+name: Build desktop installers
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Linux app build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libwebkit2gtk-4.1-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Generate app icons
+        run: npm run icons
+
+      - name: Build Windows installers
+        if: runner.os == 'Windows'
+        run: npm run tauri build -- --bundles nsis,msi
+
+      - name: Build macOS installer
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          npm run tauri build -- --target universal-apple-darwin --bundles dmg
+
+      - name: Build Linux packages
+        if: runner.os == 'Linux'
+        run: npm run tauri build -- --bundles deb,appimage
+
+      - name: Save installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediadesk-${{ runner.os }}
+          path: src-tauri/target/**/release/bundle/**

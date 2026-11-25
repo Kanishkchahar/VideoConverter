@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f3f6fa" />
+    <title>MediaDesk</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="MediaDesk home">
+          <span class="brand-mark" aria-hidden="true">▶</span>
+          <span>MediaDesk</span>
+        </a>
+        <div class="local-chip"><span class="status-dot"></span><span>Files stay on this computer</span></div>
+      </header>
+
+      <main class="layout">
+        <section class="intro">
+          <p class="eyebrow">YOUR LOCAL MEDIA TOOLKIT</p>
+          <h1>Make more of your media</h1>
+          <p class="intro-copy">Convert, compress, trim, or resize files in a few simple steps.</p>
+        </section>
+
+        <section class="converter card" aria-labelledby="converter-title">
+          <div class="card-heading">
+            <div>
+              <h2 id="converter-title">Create a media file</h2>
+              <p class="card-help">Choose a source, set your options, then save a copy.</p>
+            </div>
+            <span id="ffmpeg-badge" class="engine-badge pending"><span class="engine-icon" aria-hidden="true">FF</span><span id="ffmpeg-status">Checking FFmpeg…</span></span>
+          </div>
+
+          <div class="section-label"><span class="step-number">1</span><span>Choose a file</span></div>
+          <button id="file-picker" class="drop-zone" type="button">
+            <span class="upload-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 15.5v3A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5v-3" /></svg>
+            </span>
+            <span class="drop-title" id="file-name">Choose a video or audio file</span>
+            <span class="drop-subtitle" id="file-path">Select a file or drop it here. Video, audio, and common media formats are supported.</span>
+            <span class="browse-button">Select file</span>
+          </button>
+          <div id="file-details" class="file-details" hidden>
+            <span id="detail-duration"></span>
+            <span id="detail-resolution"></span>
+            <span id="detail-codecs"></span>
+            <span id="detail-size"></span>
+          </div>
+
+          <div class="section-label settings-title"><span class="step-number">2</span><span>Choose an action</span></div>
+          <div class="action-tabs" role="group" aria-label="Media action">
+            <button class="action-tab active" type="button" aria-pressed="true" data-operation="convert">Convert</button>
+            <button class="action-tab" type="button" aria-pressed="false" data-operation="compress">Compress</button>
+            <button class="action-tab" type="button" aria-pressed="false" data-operation="trim">Trim</button>
+            <button class="action-tab" type="button" aria-pressed="false" data-operation="resize">Adjust video</button>
+            <button class="action-tab" type="button" aria-pressed="false" data-operation="extract-audio">Extract audio</button>
+          </div>
+          <p class="action-description" id="action-description">Change the file format while keeping the video and audio.</p>
+
+          <div id="trim-controls" class="feature-controls" hidden>
+            <label class="field">
+              <span class="field-label">Start at (seconds)</span>
+              <input id="trim-start" class="text-input" type="number" min="0" step="0.1" value="0" />
+            </label>
+            <label class="field">
+              <span class="field-label">Keep for (seconds)</span>
+              <input id="trim-duration" class="text-input" type="number" min="0.1" step="0.1" placeholder="To the end" />
+            </label>
+          </div>
+
+          <div id="resize-controls" class="feature-controls" hidden>
+            <label class="field">
+              <span class="field-label">Resolution</span>
+              <span class="select-wrap">
+                <select id="resize-preset">
+                  <option value="1080p">1080p — up to 1920 × 1080</option>
+                  <option value="720p">720p — up to 1280 × 720</option>
+                  <option value="480p">480p — up to 854 × 480</option>
+                  <option value="original">Keep original size</option>
+                  <option value="custom">Custom dimensions</option>
+                </select>
+                <span class="select-chevron" aria-hidden="true">⌄</span>
+              </span>
+            </label>
+            <label class="field">
+              <span class="field-label">Rotate</span>
+              <span class="select-wrap">
+                <select id="rotation-select">
+                  <option value="none">No rotation</option>
+                  <option value="clockwise">90° clockwise</option>
+                  <option value="half">180°</option>
+                  <option value="counterclockwise">90° counterclockwise</option>
+                </select>
+                <span class="select-chevron" aria-hidden="true">⌄</span>
+              </span>
+            </label>
+            <div id="custom-size-fields" class="custom-size-fields" hidden>
+              <label class="field">
+                <span class="field-label">Maximum width (pixels)</span>
+                <input id="resize-width" class="text-input" type="number" min="16" max="7680" step="2" value="1280" />
+              </label>
+              <label class="field">
+                <span class="field-label">Maximum height (pixels)</span>
+                <input id="resize-height" class="text-input" type="number" min="16" max="7680" step="2" value="720" />
+              </label>
+            </div>
+            <p class="field-hint">The aspect ratio is preserved, and smaller videos aren’t enlarged.</p>
+          </div>
+
+          <div class="section-label output-title"><span class="step-number">3</span><span>Output settings</span></div>
+          <div class="settings-grid">
+            <label class="field">
+              <span class="field-label">Output format</span>
+              <span class="select-wrap">
+                <select id="format-select">
+                  <option value="mp4" data-kind="video">MP4 — H.264 video</option>
+                  <option value="mkv" data-kind="video">MKV — Matroska video</option>
+                  <option value="mov" data-kind="video">MOV — QuickTime video</option>
+                  <option value="webm" data-kind="video">WebM — VP9 video</option>
+                  <option value="mp3" data-kind="audio">MP3 audio</option>
+                  <option value="wav" data-kind="audio">WAV audio</option>
+                  <option value="flac" data-kind="audio">FLAC lossless audio</option>
+                </select>
+                <span class="select-chevron" aria-hidden="true">⌄</span>
+              </span>
+            </label>
+
+            <label class="field" id="quality-field">
+              <span class="field-label quality-label"><span id="quality-caption">Video quality</span><span id="quality-name">Balanced</span></span>
+              <span class="range-wrap">
+                <span class="range-caption" id="quality-low">Smaller file</span>
+                <input id="quality-range" type="range" min="1" max="10" value="7" />
+                <span class="range-caption" id="quality-high">Better quality</span>
+              </span>
+            </label>
+          </div>
+
+          <label class="hardware-row" id="hardware-row">
+            <span class="hardware-icon" aria-hidden="true">▦</span>
+            <span class="hardware-copy"><strong>Use hardware encoding when available</strong><small>FFmpeg will use a supported GPU or media engine, then fall back to CPU if needed.</small></span>
+            <span class="toggle"><input id="hardware-toggle" type="checkbox" checked /><span class="toggle-track"></span></span>
+          </label>
+
+          <div class="progress-panel" id="progress-panel" hidden>
+            <div class="progress-top"><span id="progress-message">Preparing conversion…</span><span id="progress-percent">0%</span></div>
+            <div class="progress-track" role="progressbar" aria-label="Conversion progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="progress-bar"></span></div>
+          </div>
+
+          <div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
+
+          <button id="convert-button" class="convert-button" type="button" disabled>
+            <span>Convert file</span><span class="button-arrow" aria-hidden="true">→</span>
+          </button>
+          <p class="privacy-note">Your media stays on this computer. It is not uploaded.</p>
+        </section>
+
+        <footer class="footer">MediaDesk uses FFmpeg installed on this computer.</footer>
+      </main>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
