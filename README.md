@@ -2,18 +2,21 @@
 
 MediaDesk is a cross-platform desktop GUI for FFmpeg. The interface is built with web technologies and packaged as a native desktop app with Tauri. Media files are processed locally by the FFmpeg executable on the user's computer.
 
-## Current features
+## Features
 
-- Choose a local audio or video file with a native file picker.
-- Drop a media file onto the app and view its duration, dimensions, codecs, and file size.
-- Convert to MP4, MKV, MOV, WebM, MP3, WAV, or FLAC.
-- Compress video or MP3 audio with a quality control.
-- Trim a clip by start time and duration.
-- Resize video to 1080p, 720p, or 480p, set custom bounds, or rotate it while preserving its aspect ratio.
-- Extract audio to MP3, WAV, or FLAC.
-- Adjust H.264/VP9 video quality, MP3 audio quality, or FLAC compression level.
-- Try an available H.264 hardware encoder on Windows, macOS, or Linux, with CPU fallback.
-- Show conversion progress and save to a chosen local path.
+- **Select or Drop Media**: Choose local video or audio files via native file picker or drag and drop.
+- **Visual Thumbnail Preview & Metadata**: Inspect duration, dimensions, codecs, file size, and preview a poster frame thumbnail.
+- **Broad Format Conversion**: Convert to MP4, MKV, MOV, WebM, animated GIF, MP3, WAV, or FLAC.
+- **High-Quality Animated GIF Export**: Two-pass palette generation for smooth, crisp GIF animation from video clips.
+- **Audio Strip / Mute**: Toggle to remove audio tracks for silent video exports.
+- **Compression & Quality Controls**: Fine-tune H.264/VP9 video quality, MP3 bitrate quality, or FLAC compression level.
+- **Flexible Trimming**: Set start and duration using seconds or standard timecode (`MM:SS`, `HH:MM:SS`).
+- **Video Adjustment**: Resize to 1080p, 720p, 480p, custom dimensions, or rotate (90°, 180°, 270°) while preserving aspect ratio.
+- **Audio Extraction**: Extract soundtracks directly to MP3, WAV, or FLAC.
+- **Hardware Acceleration**: Automatic GPU encoder detection (NVENC, QuickSync, AMF, VideoToolbox) with graceful CPU fallback.
+- **Live Progress & Speed/ETA**: Track conversion percentage with real-time encoding speed and estimated remaining time.
+- **Process Cancellation**: Cancel ongoing conversions at any time with immediate process termination and cleanup.
+- **Post-Export Quick Actions & History**: One-click "Play exported file" and "Show in folder" from the notification card or recent exports list.
 
 ## Requirements
 

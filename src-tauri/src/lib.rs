@@ -3,14 +3,33 @@ use std::collections::HashSet;
 use std::env;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
+
+pub struct AppState {
+    active_child: Arc<Mutex<Option<Child>>>,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            active_child: Arc::new(Mutex::new(None)),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ProgressEvent {
     percent: f64,
     message: String,
+    eta_seconds: Option<f64>,
+    speed: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -77,7 +96,7 @@ fn inspect_media(input_path: String) -> Result<MediaInfo, String> {
             "-v", "error", "-show_entries",
             "format=duration,size:stream=codec_type,codec_name,width,height", "-of", "json",
         ])
-        .arg(input_path)
+        .arg(&input_path)
         .output()
         .map_err(|_| "FFprobe was not found. Install FFmpeg with FFprobe and make sure it is on your PATH.".to_string())?;
     if !output.status.success() {
@@ -106,8 +125,120 @@ fn inspect_media(input_path: String) -> Result<MediaInfo, String> {
 }
 
 #[tauri::command]
+fn get_thumbnail(input_path: String) -> Result<String, String> {
+    use base64::Engine;
+    let file_path = std::path::Path::new(&input_path);
+    if !file_path.is_file() {
+        return Err("The file does not exist.".into());
+    }
+    let duration = probe_duration(&input_path).unwrap_or(0.0);
+    let seek_time = if duration > 3.0 { 1.5 } else { (duration * 0.2).max(0.0) };
+
+    let output = Command::new(resolve_tool("ffmpeg"))
+        .args([
+            "-ss", &format!("{seek_time:.2}"),
+            "-i", &input_path,
+            "-vframes", "1",
+            "-vf", "scale=w='min(480,iw)':h='min(270,ih)':force_original_aspect_ratio=decrease",
+            "-f", "image2pipe",
+            "-vcodec", "mjpeg",
+            "-",
+        ])
+        .output()
+        .map_err(|e| format!("Could not extract thumbnail: {e}"))?;
+
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err("No video track found or frame extraction failed.".into());
+    }
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&output.stdout);
+    Ok(format!("data:image/jpeg;base64,{b64}"))
+}
+
+#[tauri::command]
+fn cancel_conversion(state: State<'_, AppState>) -> Result<(), String> {
+    state.cancel_flag.store(true, Ordering::SeqCst);
+    if let Ok(mut lock) = state.active_child.lock() {
+        if let Some(ref mut child) = *lock {
+            let _ = child.kill();
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn show_in_folder(path: String) -> Result<(), String> {
+    let file_path = std::path::Path::new(&path);
+    if !file_path.exists() {
+        return Err("The file does not exist.".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(format!("/select,\"{}\"", file_path.to_string_lossy()))
+            .spawn()
+            .map_err(|e| format!("Could not open file manager: {e}"))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-R", &path])
+            .spawn()
+            .map_err(|e| format!("Could not reveal file: {e}"))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let parent = file_path.parent().unwrap_or(file_path);
+        Command::new("xdg-open")
+            .arg(parent)
+            .spawn()
+            .map_err(|e| format!("Could not open file manager: {e}"))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn open_media_file(path: String) -> Result<(), String> {
+    let file_path = std::path::Path::new(&path);
+    if !file_path.exists() {
+        return Err("The file does not exist.".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/c", "start", "", &path])
+            .spawn()
+            .map_err(|e| format!("Could not open file: {e}"))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Could not open file: {e}"))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Could not open file: {e}"))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn convert_media(
     app: AppHandle,
+    state: State<'_, AppState>,
     input_path: String,
     output_path: String,
     output_format: String,
@@ -120,11 +251,30 @@ async fn convert_media(
     resize_width: Option<u32>,
     resize_height: Option<u32>,
     rotation: String,
+    mute_audio: Option<bool>,
 ) -> Result<(), String> {
+    let active_child = Arc::clone(&state.active_child);
+    let cancel_flag = Arc::clone(&state.cancel_flag);
+    cancel_flag.store(false, Ordering::SeqCst);
+
     tauri::async_runtime::spawn_blocking(move || {
         convert_media_blocking(
-            app, input_path, output_path, output_format, operation, quality, use_hardware,
-            trim_start, trim_duration, resize_preset, resize_width, resize_height, rotation,
+            app,
+            active_child,
+            cancel_flag,
+            input_path,
+            output_path,
+            output_format,
+            operation,
+            quality,
+            use_hardware,
+            trim_start,
+            trim_duration,
+            resize_preset,
+            resize_width,
+            resize_height,
+            rotation,
+            mute_audio.unwrap_or(false),
         )
     })
     .await
@@ -133,6 +283,8 @@ async fn convert_media(
 
 fn convert_media_blocking(
     app: AppHandle,
+    active_child: Arc<Mutex<Option<Child>>>,
+    cancel_flag: Arc<AtomicBool>,
     input_path: String,
     output_path: String,
     output_format: String,
@@ -145,8 +297,9 @@ fn convert_media_blocking(
     resize_width: Option<u32>,
     resize_height: Option<u32>,
     rotation: String,
+    mute_audio: bool,
 ) -> Result<(), String> {
-    let allowed = ["mp4", "mkv", "mov", "webm", "mp3", "wav", "flac"];
+    let allowed = ["mp4", "mkv", "mov", "webm", "gif", "mp3", "wav", "flac"];
     if !allowed.contains(&output_format.as_str()) {
         return Err("That output format is not supported by this app yet.".into());
     }
@@ -156,7 +309,7 @@ fn convert_media_blocking(
     if operation == "extract-audio" && !["mp3", "wav", "flac"].contains(&output_format.as_str()) {
         return Err("Choose MP3, WAV, or FLAC for audio extraction.".into());
     }
-    if operation == "resize" && !["mp4", "mkv", "mov", "webm"].contains(&output_format.as_str()) {
+    if operation == "resize" && !["mp4", "mkv", "mov", "webm", "gif"].contains(&output_format.as_str()) {
         return Err("Choose a video format when resizing.".into());
     }
     if operation == "trim" && trim_start.is_some_and(|start| !start.is_finite() || start < 0.0) {
@@ -208,9 +361,11 @@ fn convert_media_blocking(
     };
 
     let result = if let Some(encoder) = hardware_encoder.as_deref() {
-        emit_progress(&app, 0.0, format!("Trying {encoder} hardware encoding…"));
+        emit_progress(&app, 0.0, format!("Trying {encoder} hardware encoding…"), None, None);
         let hardware_result = run_ffmpeg(
             &app,
+            &active_child,
+            &cancel_flag,
             &input_path,
             &output_path,
             &output_format,
@@ -223,35 +378,66 @@ fn convert_media_blocking(
             resize_width,
             resize_height,
             rotation,
+            mute_audio,
             progress_duration,
         );
         if hardware_result.is_ok() {
             hardware_result
+        } else if cancel_flag.load(Ordering::SeqCst) {
+            hardware_result
         } else {
             let _ = std::fs::remove_file(&output_path);
-            emit_progress(&app, 0.0, "Hardware encoding unavailable; retrying with CPU…".into());
+            emit_progress(&app, 0.0, "Hardware encoding unavailable; retrying with CPU…".into(), None, None);
             run_ffmpeg(
-                &app, &input_path, &output_path, &output_format, &operation, quality, None,
-                trim_start, trim_duration, resize_preset, resize_width, resize_height, rotation,
+                &app,
+                &active_child,
+                &cancel_flag,
+                &input_path,
+                &output_path,
+                &output_format,
+                &operation,
+                quality,
+                None,
+                trim_start,
+                trim_duration,
+                resize_preset,
+                resize_width,
+                resize_height,
+                rotation,
+                mute_audio,
                 progress_duration,
             )
         }
     } else {
         if use_hardware && is_h264_output(&output_format) {
-            emit_progress(&app, 0.0, "No supported hardware encoder found; using CPU…".into());
+            emit_progress(&app, 0.0, "No supported hardware encoder found; using CPU…".into(), None, None);
         } else {
-            emit_progress(&app, 0.0, "Preparing conversion…".into());
+            emit_progress(&app, 0.0, "Preparing conversion…".into(), None, None);
         }
         run_ffmpeg(
-            &app, &input_path, &output_path, &output_format, &operation, quality, None,
-            trim_start, trim_duration, resize_preset, resize_width, resize_height, rotation,
+            &app,
+            &active_child,
+            &cancel_flag,
+            &input_path,
+            &output_path,
+            &output_format,
+            &operation,
+            quality,
+            None,
+            trim_start,
+            trim_duration,
+            resize_preset,
+            resize_width,
+            resize_height,
+            rotation,
+            mute_audio,
             progress_duration,
         )
     };
 
     match result {
         Ok(()) => {
-            emit_progress(&app, 100.0, "Conversion complete".into());
+            emit_progress(&app, 100.0, "Conversion complete".into(), None, None);
             Ok(())
         }
         Err(error) => {
@@ -312,6 +498,8 @@ fn probe_duration(input_path: &str) -> Option<f64> {
 
 fn run_ffmpeg(
     app: &AppHandle,
+    active_child: &Arc<Mutex<Option<Child>>>,
+    cancel_flag: &Arc<AtomicBool>,
     input_path: &str,
     output_path: &str,
     output_format: &str,
@@ -324,6 +512,7 @@ fn run_ffmpeg(
     resize_width: Option<u32>,
     resize_height: Option<u32>,
     rotation: &str,
+    mute_audio: bool,
     duration: f64,
 ) -> Result<(), String> {
     let mut command = Command::new(resolve_tool("ffmpeg"));
@@ -350,15 +539,44 @@ fn run_ffmpeg(
             command.args(["-map", "0:a:0?", "-vn", "-c:a", "flac", "-compression_level"])
                 .arg(flac_level(quality));
         }
+        "gif" => {
+            command.arg("-an");
+            let size_str = match resize_preset.unwrap_or("original") {
+                "1080p" => "scale=w='min(1920,iw)':h=-2:flags=lanczos".to_string(),
+                "720p" => "scale=w='min(1280,iw)':h=-2:flags=lanczos".to_string(),
+                "480p" => "scale=w='min(854,iw)':h=-2:flags=lanczos".to_string(),
+                "custom" => {
+                    let w = resize_width.unwrap_or(640);
+                    let h = resize_height.unwrap_or(480);
+                    format!("scale=w='min({w},iw)':h='min({h},ih)':force_original_aspect_ratio=decrease:flags=lanczos")
+                }
+                _ => "scale=w='min(640,iw)':h=-2:flags=lanczos".to_string(),
+            };
+            let mut filter_steps = Vec::new();
+            match rotation {
+                "clockwise" => filter_steps.push("transpose=clock".to_string()),
+                "half" => filter_steps.push("hflip,vflip".to_string()),
+                "counterclockwise" => filter_steps.push("transpose=cclock".to_string()),
+                _ => {}
+            }
+            filter_steps.push("fps=15".to_string());
+            filter_steps.push(size_str);
+            let filter_joined = filter_steps.join(",");
+            let full_filter = format!("{filter_joined},split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5");
+            command.args(["-vf", &full_filter]);
+        }
         "webm" => {
+            command.args(["-map", "0:v:0?"]);
             let vp9_crf = (55_i16 - (i16::from(quality) - 1) * 3).clamp(25, 55).to_string();
-            command.args([
-                "-map", "0:v:0?", "-map", "0:a:0?", "-c:v", "libvpx-vp9", "-crf",
-            ]);
-            command.arg(vp9_crf).args(["-b:v", "0", "-c:a", "libopus", "-b:a", "160k"]);
+            command.args(["-c:v", "libvpx-vp9", "-crf"]).arg(vp9_crf).args(["-b:v", "0"]);
+            if mute_audio {
+                command.arg("-an");
+            } else {
+                command.args(["-map", "0:a:0?", "-c:a", "libopus", "-b:a", "160k"]);
+            }
         }
         _ => {
-            command.args(["-map", "0:v:0?", "-map", "0:a:0?"]);
+            command.args(["-map", "0:v:0?"]);
             if let Some(encoder) = hardware_encoder {
                 command.args(["-c:v", encoder]);
                 if encoder == "h264_mf" {
@@ -370,14 +588,18 @@ fn run_ffmpeg(
                 let crf = (33_i16 - (i16::from(quality) - 1) * 2).clamp(18, 33).to_string();
                 command.args(["-c:v", "libx264", "-preset", "medium", "-crf"]).arg(crf);
             }
-            command.args(["-c:a", "aac", "-b:a", "192k"]);
+            if mute_audio {
+                command.arg("-an");
+            } else {
+                command.args(["-map", "0:a:0?", "-c:a", "aac", "-b:a", "192k"]);
+            }
             if output_format == "mp4" {
                 command.args(["-movflags", "+faststart"]);
             }
         }
     }
 
-    if operation == "resize" {
+    if operation == "resize" && output_format != "gif" {
         let mut filters = Vec::new();
         match rotation {
             "clockwise" => filters.push("transpose=clock".to_string()),
@@ -407,7 +629,11 @@ fn run_ffmpeg(
         }
     }
 
-    let muxer = if output_format == "mkv" { "matroska" } else { output_format };
+    let muxer = match output_format {
+        "mkv" => "matroska",
+        "gif" => "gif",
+        other => other,
+    };
     command.args(["-f", muxer, output_path]);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -415,29 +641,70 @@ fn run_ffmpeg(
         format!("Could not start FFmpeg: {error}. Install FFmpeg and make sure it is on your PATH.")
     })?;
     let stderr = child.stderr.take().ok_or("Could not read FFmpeg errors.")?;
+    let stdout = child.stdout.take();
+
+    // Store child handle for cancellation
+    if let Ok(mut lock) = active_child.lock() {
+        *lock = Some(child);
+    }
+
     let stderr_reader = thread::spawn(move || {
         let mut message = String::new();
         let _ = BufReader::new(stderr).read_to_string(&mut message);
         message
     });
 
-    if let Some(stdout) = child.stdout.take() {
-        for line in BufReader::new(stdout).lines().flatten() {
-            if let Some(value) = line.strip_prefix("out_time=") {
+    let mut current_speed: Option<String> = None;
+    if let Some(out) = stdout {
+        for line in BufReader::new(out).lines().flatten() {
+            if cancel_flag.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Some(val) = line.strip_prefix("speed=") {
+                let spd = val.trim();
+                if !spd.is_empty() && spd != "N/A" {
+                    current_speed = Some(spd.to_string());
+                }
+            } else if let Some(value) = line.strip_prefix("out_time=") {
                 if let Some(seconds) = parse_ffmpeg_time(value) {
                     if duration > 0.0 {
                         let percent = (seconds / duration * 100.0).clamp(0.0, 99.0);
-                        emit_progress(app, percent, "Converting media…".into());
+                        let mut eta_seconds: Option<f64> = None;
+                        if let Some(ref speed_str) = current_speed {
+                            let speed_num: Option<f64> = speed_str.trim_end_matches('x').trim().parse().ok();
+                            if let Some(spd) = speed_num {
+                                if spd > 0.05 {
+                                    let rem = (duration - seconds).max(0.0);
+                                    eta_seconds = Some(rem / spd);
+                                }
+                            }
+                        }
+                        emit_progress(app, percent, "Converting media…".into(), eta_seconds, current_speed.clone());
                     }
                 }
             } else if line == "progress=end" {
-                emit_progress(app, 99.0, "Finishing output file…".into());
+                emit_progress(app, 99.0, "Finishing output file…".into(), None, None);
             }
         }
     }
 
-    let status = child.wait().map_err(|error| format!("Could not wait for FFmpeg: {error}"))?;
+    let child_opt = {
+        let mut lock = active_child.lock().unwrap();
+        lock.take()
+    };
+
+    let status = if let Some(mut c) = child_opt {
+        c.wait().map_err(|error| format!("Could not wait for FFmpeg: {error}"))?
+    } else {
+        return Err("Process terminated.".into());
+    };
+
     let error_text = stderr_reader.join().unwrap_or_default();
+
+    if cancel_flag.load(Ordering::SeqCst) {
+        return Err("Conversion was cancelled by user.".into());
+    }
+
     if status.success() {
         Ok(())
     } else {
@@ -468,8 +735,8 @@ fn flac_level(quality: u8) -> String {
     value.to_string()
 }
 
-fn emit_progress(app: &AppHandle, percent: f64, message: String) {
-    let _ = app.emit("conversion-progress", ProgressEvent { percent, message });
+fn emit_progress(app: &AppHandle, percent: f64, message: String, eta_seconds: Option<f64>, speed: Option<String>) {
+    let _ = app.emit("conversion-progress", ProgressEvent { percent, message, eta_seconds, speed });
 }
 
 fn resolve_tool(name: &str) -> PathBuf {
@@ -522,8 +789,17 @@ fn resolve_tool(name: &str) -> PathBuf {
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(AppState::default())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![ffmpeg_info, inspect_media, convert_media])
+        .invoke_handler(tauri::generate_handler![
+            ffmpeg_info,
+            inspect_media,
+            get_thumbnail,
+            convert_media,
+            cancel_conversion,
+            show_in_folder,
+            open_media_file,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running MediaDesk");
 }
